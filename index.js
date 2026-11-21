@@ -150,4 +150,81 @@ const server = http.createServer(async (req,res)=>{
   } catch(error) {console.error(error);return reply(400,{error:error.message||"Voice request failed"});}
 });
 server.listen(Number(process.env.PORT)||8080,"0.0.0.0");
+
+const {ActionRowBuilder,ButtonBuilder,ButtonStyle,ModalBuilder,TextInputBuilder,TextInputStyle,UserSelectMenuBuilder,PermissionFlagsBits:P,ChannelType}=require("discord.js");
+const rooms=new Map(), creating=new Set();
+const panelActions=[["rename","Rename"],["lock","Lock / Unlock"],["hide","Hide / Show"],["limit","User Limit"],["invite","Allow Member"],["block","Block Member"],["mute","Mute / Unmute"],["kick","Disconnect"],["transfer","Transfer Owner"],["share","Share Controls"],["revoke","Remove Controls"],["delete","Delete Room"]];
+function roomPanel(room){
+ const rows=[];
+ for(let i=0;i<panelActions.length;i+=4)rows.push(new ActionRowBuilder().addComponents(panelActions.slice(i,i+4).map(([id,label])=>new ButtonBuilder().setCustomId("room:"+room.id+":"+id).setLabel(label).setStyle(id==="delete"?ButtonStyle.Danger:ButtonStyle.Secondary))));
+ return {content:"🎛️ **Room Control Panel**\nOwner: <@"+room.owner+">\nOnly the owner and authorised controllers can use these controls.",components:rows,allowedMentions:{parse:[]}};
+}
+async function cleanRoom(channel){
+ const room=rooms.get(channel?.id);
+ if(!room||room.creating||channel.members.some(m=>!m.user.bot))return;
+ if(room.deleting)return;room.deleting=true;
+ try{await channel.delete("Temporary voice room empty");rooms.delete(channel.id);}catch(e){room.deleting=false;console.error("Room cleanup",e);}
+}
+client.on("voiceStateUpdate",async(oldState,newState)=>{
+ if(oldState.channelId===newState.channelId)return;
+ try{
+  if(oldState.channel)await cleanRoom(oldState.channel);
+  if(newState.channelId!==process.env.JOIN_TO_CREATE_CHANNEL_ID||!newState.member||newState.member.user.bot||creating.has(newState.id))return;
+  creating.add(newState.id);
+  let channel;
+  try{
+   const source=newState.channel;
+   channel=await newState.guild.channels.create({name:(newState.member.displayName+"’s room").slice(0,100),type:ChannelType.GuildVoice,parent:source.parentId||undefined,reason:"Temporary voice room"});
+   const room={id:channel.id,owner:newState.id,controllers:new Set(),creating:true,locked:false,hidden:false};
+   rooms.set(channel.id,room);
+   await channel.permissionOverwrites.edit(client.user.id,{ViewChannel:true,Connect:true,SendMessages:true,ReadMessageHistory:true});
+   await channel.permissionOverwrites.edit(room.owner,{ViewChannel:true,Connect:true});
+   if(newState.guild.voiceStates.cache.get(newState.id)?.channelId!==source.id)throw Error("Member left creator channel");
+   await newState.member.voice.setChannel(channel);
+   room.creating=false;
+   const msg=await channel.send(roomPanel(room));room.panelId=msg.id;
+   await cleanRoom(channel);
+  }catch(e){console.error("Create room",e);if(channel){try{await channel.delete("Temporary room setup failed");rooms.delete(channel.id);}catch(err){console.error(err);const room=rooms.get(channel.id);if(room)room.creating=false;}}}
+  finally{creating.delete(newState.id);}
+ }catch(e){console.error("Voice state",e);}
+});
+client.on("interactionCreate",async i=>{
+ if(!i.customId?.startsWith("room:"))return;
+ const [,id,action,stage]=i.customId.split(":");
+ const room=rooms.get(id),channel=i.guild?.channels.cache.get(id);
+ const deny=content=>i.reply({content,ephemeral:true});
+ if(!room||!channel||i.channelId!==id)return deny("This room is no longer available.");
+ if(i.user.id!==room.owner&&!room.controllers.has(i.user.id))return deny("You do not have room controls.");
+ try{
+  if(i.isButton()&&["rename","limit"].includes(action)){
+   return await i.showModal(new ModalBuilder().setCustomId("room:"+id+":"+action+":input").setTitle(action==="rename"?"Rename room":"Set user limit").addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("value").setLabel(action==="rename"?"Room name":"0–99 (0 = unlimited)").setStyle(TextInputStyle.Short).setMaxLength(action==="rename"?100:2).setRequired(true))));
+  }
+  if(i.isButton()&&["invite","block","mute","kick","transfer","share","revoke"].includes(action)){
+   return await i.reply({content:"Choose a member.",ephemeral:true,components:[new ActionRowBuilder().addComponents(new UserSelectMenuBuilder().setCustomId("room:"+id+":"+action+":user").setPlaceholder("Select a member").setMaxValues(1))]});
+  }
+  await i.deferReply({ephemeral:true});
+  const everyone=i.guild.roles.everyone;
+  if(action==="rename"&&i.isModalSubmit()){const name=i.fields.getTextInputValue("value").trim();if(!name)throw Error("Enter a room name.");await channel.setName(name);}
+  else if(action==="limit"&&i.isModalSubmit()){const value=i.fields.getTextInputValue("value");if(!/^\d{1,2}$/.test(value))throw Error("Enter 0–99.");await channel.setUserLimit(Number(value));}
+  else if(action==="lock"&&i.isButton()){await channel.permissionOverwrites.edit(everyone,{Connect:room.locked?null:false});room.locked=!room.locked;}
+  else if(action==="hide"&&i.isButton()){await channel.permissionOverwrites.edit(everyone,{ViewChannel:room.hidden?null:false});room.hidden=!room.hidden;}
+  else if(action==="delete"&&i.isButton()){await i.editReply("Deleting room.");await channel.delete("Room controller requested deletion");rooms.delete(id);return;}
+  else if(i.isUserSelectMenu()){
+   const target=await i.guild.members.fetch(i.values[0]);
+   if(target.user.bot)throw Error("Choose a human member.");
+   if(["block","kick","mute","revoke"].includes(action)&&target.id===room.owner)throw Error("The room owner is protected.");
+   if(["kick","mute"].includes(action)&&target.voice.channelId!==id)throw Error("That member is not in this room.");
+   if(action==="invite"){await channel.permissionOverwrites.edit(target.id,{ViewChannel:true,Connect:true});}
+   else if(action==="block"){await channel.permissionOverwrites.edit(target.id,{ViewChannel:false,Connect:false});room.controllers.delete(target.id);if(target.voice.channelId===id)await target.voice.disconnect();}
+   else if(action==="kick")await target.voice.disconnect();
+   else if(action==="mute")await target.voice.setMute(!target.voice.serverMute);
+   else if(action==="share"){await channel.permissionOverwrites.edit(target.id,{ViewChannel:true,Connect:true});room.controllers.add(target.id);}
+   else if(action==="revoke")room.controllers.delete(target.id);
+   else if(action==="transfer"){if(i.user.id!==room.owner)throw Error("Only the owner can transfer ownership.");await channel.permissionOverwrites.edit(target.id,{ViewChannel:true,Connect:true});room.controllers.delete(target.id);room.owner=target.id;if(room.panelId)await (await channel.messages.fetch(room.panelId)).edit(roomPanel(room));}
+   else throw Error("Unknown control.");
+  }else throw Error("Unknown control.");
+  await i.editReply("✅ Room updated.");
+ }catch(e){console.error("Room control",e);const response={content:"Room control failed: "+String(e.message).slice(0,250),ephemeral:true};if(i.deferred||i.replied)await i.editReply({content:response.content}).catch(()=>{});else await i.reply(response).catch(()=>{});}
+});
+
 client.login(process.env.BOT_TOKEN);
