@@ -5,7 +5,7 @@ const {spawn}=require("node:child_process");
 const ffmpeg=require("ffmpeg-static");
 const tts=require("google-tts-api");
 const {Readable}=require("node:stream");
-module.exports.command=new SlashCommandBuilder().setName("voice-assistant").setDescription("Configure Mini Minzo").setDefaultMemberPermissions(P.Administrator).addStringOption(o=>o.setName("action").setDescription("Enable or disable in your current voice channel").setRequired(true).addChoices({name:"Enable",value:"enable"},{name:"Disable",value:"disable"},{name:"Test voice reply",value:"test"}));
+module.exports.command=new SlashCommandBuilder().setName("voice-assistant").setDescription("Configure Mini Minzo").setDefaultMemberPermissions(P.Administrator).addStringOption(o=>o.setName("action").setDescription("Enable or disable in your current voice channel").setRequired(true).addChoices({name:"Enable",value:"enable"},{name:"Disable",value:"disable"},{name:"Test voice reply",value:"test"},{name:"Wake assistant manually",value:"wake"}));
 module.exports.install=function(client,{isBusy=()=>false}={}){
  const enabled=new Map(), active=new Map();
  const numbers=new Map();
@@ -54,7 +54,10 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
   const match=/^(?:server )?(mute|unmute|deafen|undeafen) (user .+)$/.exec(text);if(!match)return say(s,"I did not understand the command. Please try again.");
   const spoken=match[2].match(/^user (.+)$/);const words={one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10,eleven:11,twelve:12,thirteen:13,fourteen:14,fifteen:15,sixteen:16,seventeen:17,eighteen:18,nineteen:19,twenty:20};const tens={twenty:20,thirty:30,forty:40,fifty:50,sixty:60,seventy:70,eighty:80,ninety:90};const tokens=spoken?.[1].split(" ")||[];const num=spoken?(words[spoken[1]]||((tens[tokens[0]]&&tokens.length<=2)?tens[tokens[0]]+(words[tokens[1]]||0):Number(spoken[1]))):null;const entries=numbers.get(s.channel.guild.id)?.entries;const targets=s.channel.members.filter(t=>!t.user.bot&&(spoken?entries?.get(t.id)?.n===num:[t.displayName,t.user.username,entries?.get(t.id)?.original].some(n=>n?.toLowerCase()===match[2])));
   if(targets.size!==1)return say(s,"I could not identify one matching member.");
-  const t=targets.first();if(admin(t)||t.id===id||!t.manageable||(m.id!==m.guild.ownerId&&m.roles.highest.comparePositionTo(t.roles.highest)<=0))return say(s,"That member is protected.");
+  const t=targets.first();if(t.id===id)return say(s,"That number is your own. Choose another user.");
+  if(admin(t))return say(s,"User "+num+" is an administrator and is protected.");
+  if(!t.manageable)return say(s,"User "+num+" is above my role or is the server owner.");
+  if(m.id!==m.guild.ownerId&&m.roles.highest.comparePositionTo(t.roles.highest)<=0)return say(s,"User "+num+" has an equal or higher role than you.");
   const deaf=match[1].includes("deafen"),field=deaf?"serverDeaf":"serverMute",method=deaf?"setDeaf":"setMute",after=!match[1].startsWith("un"),before=t.voice[field];
   if(before===after)return say(s,"Already in that state.");
   await t.voice[method](after,"Mini Minzo voice command");s.undo.set(id,{id:t.id,field,method,before,after,time:Date.now()});await say(s,"User "+num+" has been server "+({mute:"muted",unmute:"unmuted",deafen:"deafened",undeafen:"undeafened"}[match[1]])+".");
@@ -86,7 +89,7 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
      console.log("Mini Minzo: recognition process started");
      const timer=setTimeout(()=>{stream.destroy();decoder.end();},8000);
      const hardTimeout=setTimeout(()=>child.kill(),25000);
-     try{await new Promise((resolve,reject)=>{child.once("error",reject);child.once("close",c=>c===0?resolve():reject(Error("Recognition failed")));});const result=JSON.parse(out);const recognized=result.text||"";console.log("Mini Minzo: mode="+mode+" rms="+result.rms+" peak="+result.peak+" confidence="+result.confidence);console.log("Mini Minzo: recognition finished; packets="+packets+" pcmBytes="+bytes+" words="+(recognized.trim()?recognized.trim().split(/\s+/).length:0)+" wake="+/^mini minzo\b/i.test(recognized)+" undo="+/^(mini minzo )?undo$/i.test(recognized));if(active.get(guild.id)===s&&!s.manual&&s.consent?.has(id)&&admin(channel.members.get(id))){if(recognized)await execute(s,id,recognized);else if(mode==="command"){s.armed.delete(id);await say(s,"I did not understand. Please say Mini M and try again.");}}}finally{clearTimeout(timer);clearTimeout(hardTimeout);stream.destroy();decoder.destroy();child.kill();}
+     try{await new Promise((resolve,reject)=>{child.once("error",reject);child.once("close",c=>c===0?resolve():reject(Error("Recognition failed")));});const result=JSON.parse(out);const recognized=result.text||"";console.log("Mini Minzo: mode="+mode+" rms="+result.rms+" peak="+result.peak+" confidence="+result.confidence);console.log("Mini Minzo: recognition finished; packets="+packets+" pcmBytes="+bytes+" words="+(recognized.trim()?recognized.trim().split(/\s+/).length:0)+" wake="+/^mini minzo\b/i.test(recognized)+" undo="+/^(mini minzo )?undo$/i.test(recognized));if(active.get(guild.id)===s&&!s.manual&&s.consent?.has(id)&&admin(channel.members.get(id))){if(recognized)await execute(s,id,recognized);else if(mode==="command"){s.armed.delete(id);await say(s,"I did not understand. Please say Mot and try again.");}}}finally{clearTimeout(timer);clearTimeout(hardTimeout);stream.destroy();decoder.destroy();child.kill();}
     }catch(e){console.error("Mini Minzo",e.message);}finally{s.busy=false;s.speaker=null;s.child=null;s.stream=null;}
    });
   }catch(e){close(guild.id);throw e;}
@@ -116,12 +119,13 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
   if(!i.guild||!i.memberPermissions.has(P.Administrator))return i.reply({content:"Administrators only.",ephemeral:true});
   await i.deferReply({ephemeral:true});
   try{if(i.options.getString("action")==="disable"){enabled.delete(i.guild.id);close(i.guild.id);await syncNumbers(i.guild);return i.editReply("Assistant disabled.");}
+   if(i.options.getString("action")==="wake"){const s=active.get(i.guild.id);if(!s||!s.consent?.has(i.user.id)||i.member.voice.channelId!==s.channel.id)throw Error("Enable the assistant in your voice channel first.");await manualSpeak(i.guild,i.user.id,"Yes, sir?","robot");if(active.get(i.guild.id)===s&&s.consent?.has(i.user.id)&&i.member.voice.channelId===s.channel.id)s.armed.set(i.user.id,Date.now()+15000);return await i.editReply("Listening for your numbered command for 15 seconds.");}
    if(i.options.getString("action")==="test"){const s=active.get(i.guild.id);if(!s||i.member.voice.channelId!==s.channel.id||s.manual)throw Error("Enable the assistant in your voice channel first, or stop the current reply.");await manualSpeak(i.guild,i.user.id,"Yes, sir?","robot");return await i.editReply("Test voice reply played.");}
    const channel=i.member.voice.channel;if(!channel||channel.type!==2||channel.id===process.env.JOIN_TO_CREATE_CHANNEL_ID)throw Error("Join a normal voice channel first.");
    if(enabled.get(i.guild.id)!==channel.id)close(i.guild.id);
    enabled.set(i.guild.id,channel.id);await reconcile(i.guild);await syncNumbers(i.guild);
    const s=active.get(i.guild.id);if(!s)throw Error("Voice connection unavailable. Stop other speech first.");
-   (s.consent??=new Set()).add(i.user.id);console.log("Mini Minzo: admin consent enabled; connection="+s.connection.state.status);await i.editReply("Enabled. Your speech is processed locally. Say Mini M, wait for Yes sir, then say server mute user five (using the displayed number). Disable to stop.");
+   (s.consent??=new Set()).add(i.user.id);console.log("Mini Minzo: admin consent enabled; connection="+s.connection.state.status);await i.editReply("Enabled. Your speech is processed locally. Say Mot, wait for Yes sir, then say server mute user five (using the displayed number). Disable to stop.");
   }catch(e){await i.editReply(e.message);}
  });
  return {manualSpeak,manualStop};
