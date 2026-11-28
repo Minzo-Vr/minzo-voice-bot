@@ -6,10 +6,10 @@ const ffmpeg=require("ffmpeg-static");
 const tts=require("google-tts-api");
 const {Readable}=require("node:stream");
 module.exports.command=new SlashCommandBuilder().setName("voice-assistant").setDescription("Configure Mini Minzo").setDefaultMemberPermissions(P.Administrator).addStringOption(o=>o.setName("action").setDescription("Enable or disable in your current voice channel").setRequired(true).addChoices({name:"Enable",value:"enable"},{name:"Disable",value:"disable"}));
-module.exports.install=function(client){
+module.exports.install=function(client,{isBusy=()=>false}={}){
  const enabled=new Map(), active=new Map();
  const admin=m=>m&&!m.user.bot&&m.permissions.has(P.Administrator);
- function close(id){const s=active.get(id);if(!s)return;active.delete(id);s.child?.kill();s.stream?.destroy();s.player.stop(true);s.connection.destroy();}
+ function close(id){const s=active.get(id);if(!s)return;active.delete(id);s.child?.kill();s.stream?.destroy();s.player.stop(true);if(s.connection.state.status!=="destroyed")s.connection.destroy();}
  async function say(s,text){
   const r=await fetch(tts.getAudioUrl(text.slice(0,180),{lang:"en"}),{signal:AbortSignal.timeout(10000)});
   if(!r.ok)throw Error("TTS failed");
@@ -25,22 +25,22 @@ module.exports.install=function(client){
   text=text.toLowerCase().trim();
   if(/^(mini minzo )?undo$/.test(text)){
    const u=s.undo.get(id);if(!u)return say(s,"Nothing to undo.");
-   const t=s.channel.members.get(u.id);if(!t||t.voice[u.field]!==u.after)return say(s,"Cannot undo. State changed.");
+   const t=s.channel.members.get(u.id);if(!t||!t.manageable||admin(t)||Date.now()-u.time>30000||t.voice[u.field]!==u.after)return say(s,"Cannot undo. State changed.");
    await t.voice[u.method](u.before,"Mini Minzo undo");s.undo.delete(id);return say(s,"Undo.");
   }
   const match=/^mini minzo (?:server )?(mute|unmute|deafen|undeafen) (.+)$/.exec(text);if(!match)return;
   const targets=s.channel.members.filter(t=>!t.user.bot&&[t.displayName,t.user.username].some(n=>n.toLowerCase()===match[2]));
   if(targets.size!==1)return say(s,"I could not identify one matching member.");
-  const t=targets.first();if(admin(t)||t.id===id)return say(s,"That member is protected.");
+  const t=targets.first();if(admin(t)||t.id===id||!t.manageable||(m.id!==m.guild.ownerId&&m.roles.highest.comparePositionTo(t.roles.highest)<=0))return say(s,"That member is protected.");
   const deaf=match[1].includes("deafen"),field=deaf?"serverDeaf":"serverMute",method=deaf?"setDeaf":"setMute",after=!match[1].startsWith("un"),before=t.voice[field];
   if(before===after)return say(s,"Already in that state.");
-  await t.voice[method](after,"Mini Minzo voice command");s.undo.set(id,{id:t.id,field,method,before,after});await say(s,"Server "+match[1]+"d "+t.displayName);
+  await t.voice[method](after,"Mini Minzo voice command");s.undo.set(id,{id:t.id,field,method,before,after,time:Date.now()});await say(s,"Server "+({mute:"muted",unmute:"unmuted",deafen:"deafened",undeafen:"undeafened"}[match[1]])+" "+t.displayName);
  }
  async function reconcile(guild){
   const channel=guild.channels.cache.get(enabled.get(guild.id));
   const existing=active.get(guild.id);
   if(!channel||!channel.members.some(admin)){close(guild.id);return;}
-  if(existing||getVoiceConnection(guild.id))return;
+  if(existing||isBusy(guild.id)||getVoiceConnection(guild.id))return;
   const connection=joinVoiceChannel({channelId:channel.id,guildId:guild.id,adapterCreator:guild.voiceAdapterCreator,selfDeaf:false});
   const s={channel,connection,player:createAudioPlayer(),undo:new Map(),busy:false};active.set(guild.id,s);
   connection.on("error",()=>close(guild.id));s.player.on("error",()=>close(guild.id));
@@ -68,7 +68,7 @@ module.exports.install=function(client){
   if(!i.guild||!i.memberPermissions.has(P.Administrator))return i.reply({content:"Administrators only.",ephemeral:true});
   await i.deferReply({ephemeral:true});
   try{if(i.options.getString("action")==="disable"){enabled.delete(i.guild.id);close(i.guild.id);return i.editReply("Assistant disabled.");}
-   const channel=i.member.voice.channel;if(!channel||channel.type!==2)throw Error("Join a normal voice channel first.");
+   const channel=i.member.voice.channel;if(!channel||channel.type!==2||channel.id===process.env.JOIN_TO_CREATE_CHANNEL_ID)throw Error("Join a normal voice channel first.");
    if(enabled.get(i.guild.id)!==channel.id)close(i.guild.id);
    enabled.set(i.guild.id,channel.id);await reconcile(i.guild);
    const s=active.get(i.guild.id);if(!s)throw Error("Voice connection unavailable. Stop other speech first.");
