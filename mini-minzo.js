@@ -23,16 +23,22 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
   });return state.queue;
  }
  const admin=m=>m&&!m.user.bot&&m.permissions.has(P.Administrator);
- function close(id){const s=active.get(id);if(!s)return;active.delete(id);s.child?.kill();s.stream?.destroy();s.player.stop(true);if(s.connection.state.status!=="destroyed")s.connection.destroy();}
- async function say(s,text){
-  const r=await fetch(tts.getAudioUrl(text.slice(0,180),{lang:"en"}),{signal:AbortSignal.timeout(10000)});
-  if(!r.ok)throw Error("TTS failed");
-  const f=spawn(ffmpeg,["-loglevel","error","-i","pipe:0","-af","aecho=0.8:0.88:60:0.4,highpass=f=250","-c:a","libopus","-f","ogg","pipe:1"]);
-  f.on("error",console.error);f.stdin.on("error",()=>{});f.stderr.resume();
-  const input=Readable.fromWeb(r.body);input.on("error",()=>f.kill());input.pipe(f.stdin);
-  s.player.play(createAudioResource(f.stdout,{inputType:StreamType.OggOpus}));
-  await entersState(s.player,AudioPlayerStatus.Playing,10000);
-  await entersState(s.player,AudioPlayerStatus.Idle,20000).finally(()=>f.kill());
+ function close(id){const s=active.get(id);if(!s)return;active.delete(id);s.child?.kill();s.stream?.destroy();s.playAbort?.abort();s.ffmpeg?.kill();s.player.stop(true);if(s.connection.state.status!=="destroyed")s.connection.destroy();}
+ async function say(s,text,voice="robot"){
+  const controller=new AbortController();s.playAbort=controller;let f,input;
+  try{
+   console.log("Mini Minzo: playback requested");
+   const r=await fetch(tts.getAudioUrl(text.slice(0,180),{lang:"en",slow:false}),{signal:AbortSignal.any([controller.signal,AbortSignal.timeout(10000)])});
+   if(!r.ok)throw Error("TTS failed: "+r.status);
+   f=spawn(ffmpeg,["-loglevel","error","-i","pipe:0","-af",voice==="robot"?"aecho=0.8:0.88:60:0.4,highpass=f=250":"anull","-c:a","libopus","-f","ogg","pipe:1"]);s.ffmpeg=f;
+   f.on("error",e=>{console.error("Mini Minzo playback:",e.message);controller.abort();});f.stdin.on("error",()=>{});f.stderr.resume();
+   input=Readable.fromWeb(r.body);input.on("error",()=>f.kill());input.pipe(f.stdin);
+   s.player.play(createAudioResource(f.stdout,{inputType:StreamType.OggOpus}));
+   await entersState(s.player,AudioPlayerStatus.Playing,10000);
+   console.log("Mini Minzo: playback started");
+   await entersState(s.player,AudioPlayerStatus.Idle,20000);
+   console.log("Mini Minzo: playback finished");
+  }finally{input?.destroy();f?.kill();if(s.playAbort===controller){s.playAbort=null;s.ffmpeg=null;s.player.stop(true);}}
  }
  async function execute(s,id,text){
   const m=s.channel.members.get(id);if(!admin(m)||active.get(s.channel.guild.id)!==s)return;
@@ -66,7 +72,7 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
    connection.receiver.speaking.on("start",async id=>{
     if(!admin(channel.members.get(id))||!s.consent?.has(id))return;
     console.log("Mini Minzo: consenting admin speaking; busy="+s.busy);
-    if(s.busy)return;
+    if(s.busy||s.manual)return;
     s.busy=true;s.speaker=id;
     try{
      const prism=require("prism-media");
@@ -80,10 +86,29 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
      console.log("Mini Minzo: recognition process started");
      const timer=setTimeout(()=>{stream.destroy();decoder.end();},8000);
      const hardTimeout=setTimeout(()=>child.kill(),25000);
-     try{await new Promise((resolve,reject)=>{child.once("error",reject);child.once("close",c=>c===0?resolve():reject(Error("Recognition failed")));});const result=JSON.parse(out);const recognized=result.text||"";console.log("Mini Minzo: mode="+mode+" rms="+result.rms+" peak="+result.peak+" confidence="+result.confidence);console.log("Mini Minzo: recognition finished; packets="+packets+" pcmBytes="+bytes+" words="+(recognized.trim()?recognized.trim().split(/\s+/).length:0)+" wake="+/^mini minzo\b/i.test(recognized)+" undo="+/^(mini minzo )?undo$/i.test(recognized));if(active.get(guild.id)===s&&s.consent?.has(id)&&admin(channel.members.get(id))){if(recognized)await execute(s,id,recognized);else if(mode==="command"){s.armed.delete(id);await say(s,"I did not understand. Please say Mini Minzo and try again.");}}}finally{clearTimeout(timer);clearTimeout(hardTimeout);stream.destroy();decoder.destroy();child.kill();}
+     try{await new Promise((resolve,reject)=>{child.once("error",reject);child.once("close",c=>c===0?resolve():reject(Error("Recognition failed")));});const result=JSON.parse(out);const recognized=result.text||"";console.log("Mini Minzo: mode="+mode+" rms="+result.rms+" peak="+result.peak+" confidence="+result.confidence);console.log("Mini Minzo: recognition finished; packets="+packets+" pcmBytes="+bytes+" words="+(recognized.trim()?recognized.trim().split(/\s+/).length:0)+" wake="+/^mini minzo\b/i.test(recognized)+" undo="+/^(mini minzo )?undo$/i.test(recognized));if(active.get(guild.id)===s&&!s.manual&&s.consent?.has(id)&&admin(channel.members.get(id))){if(recognized)await execute(s,id,recognized);else if(mode==="command"){s.armed.delete(id);await say(s,"I did not understand. Please say Mini M and try again.");}}}finally{clearTimeout(timer);clearTimeout(hardTimeout);stream.destroy();decoder.destroy();child.kill();}
     }catch(e){console.error("Mini Minzo",e.message);}finally{s.busy=false;s.speaker=null;s.child=null;s.stream=null;}
    });
   }catch(e){close(guild.id);throw e;}
+ }
+ async function manualSpeak(guild,userId,phrase,voice){
+  const s=active.get(guild.id);if(!s)return null;
+  if(guild.voiceStates.cache.get(userId)?.channelId!==s.channel.id)throw Error("Join the assistant's voice channel first.");
+  if(s.manual)throw Error("Already playing a manual reply. Use /stop first.");
+  s.manual=true;s.armed.clear();
+  try{
+   s.child?.kill();s.stream?.destroy();s.playAbort?.abort();s.ffmpeg?.kill();s.player.stop(true);
+   const until=Date.now()+12000;
+   while(s.busy&&Date.now()<until)await new Promise(r=>setTimeout(r,100));
+   if(s.busy||active.get(guild.id)!==s)throw Error("Assistant is still resetting. Try again or disable and enable it.");
+   if(!s.manual)throw Error("Playback stopped.");
+   await say(s,phrase,voice);return s.channel.name;
+  }finally{s.manual=false;}
+ }
+ function manualStop(guild,userId){
+  const s=active.get(guild.id);if(!s)return false;
+  if(guild.voiceStates.cache.get(userId)?.channelId!==s.channel.id)throw Error("Join the assistant's voice channel first.");
+  s.armed.clear();s.playAbort?.abort();s.ffmpeg?.kill();s.player.stop(true);s.child?.kill();s.stream?.destroy();return true;
  }
  client.on("voiceStateUpdate",(a,b)=>{if(a.channelId!==b.channelId){const s=active.get(b.guild.id);if(s&&a.channelId===s.channel.id){s.consent?.delete(a.id);s.armed.delete(a.id);if(s.speaker===a.id){s.child?.kill();s.stream?.destroy();}}reconcile(b.guild).catch(console.error);syncNumbers(b.guild).catch(console.error);}});
  client.on("interactionCreate",async i=>{
@@ -91,12 +116,13 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
   if(!i.guild||!i.memberPermissions.has(P.Administrator))return i.reply({content:"Administrators only.",ephemeral:true});
   await i.deferReply({ephemeral:true});
   try{if(i.options.getString("action")==="disable"){enabled.delete(i.guild.id);close(i.guild.id);await syncNumbers(i.guild);return i.editReply("Assistant disabled.");}
-   if(i.options.getString("action")==="test"){const s=active.get(i.guild.id);if(!s||i.member.voice.channelId!==s.channel.id||s.busy)throw Error("Enable the assistant in your voice channel and wait until it is idle.");s.busy=true;try{await say(s,"Yes, sir?");return await i.editReply("Test voice reply played.");}finally{s.busy=false;}}
+   if(i.options.getString("action")==="test"){const s=active.get(i.guild.id);if(!s||i.member.voice.channelId!==s.channel.id||s.manual)throw Error("Enable the assistant in your voice channel first, or stop the current reply.");await manualSpeak(i.guild,i.user.id,"Yes, sir?","robot");return await i.editReply("Test voice reply played.");}
    const channel=i.member.voice.channel;if(!channel||channel.type!==2||channel.id===process.env.JOIN_TO_CREATE_CHANNEL_ID)throw Error("Join a normal voice channel first.");
    if(enabled.get(i.guild.id)!==channel.id)close(i.guild.id);
    enabled.set(i.guild.id,channel.id);await reconcile(i.guild);await syncNumbers(i.guild);
    const s=active.get(i.guild.id);if(!s)throw Error("Voice connection unavailable. Stop other speech first.");
-   (s.consent??=new Set()).add(i.user.id);console.log("Mini Minzo: admin consent enabled; connection="+s.connection.state.status);await i.editReply("Enabled. Your speech is processed locally. Say Mini Minzo, wait for Yes sir, then say server mute user five (using the displayed number). Disable to stop.");
+   (s.consent??=new Set()).add(i.user.id);console.log("Mini Minzo: admin consent enabled; connection="+s.connection.state.status);await i.editReply("Enabled. Your speech is processed locally. Say Mini M, wait for Yes sir, then say server mute user five (using the displayed number). Disable to stop.");
   }catch(e){await i.editReply(e.message);}
  });
+ return {manualSpeak,manualStop};
 };
