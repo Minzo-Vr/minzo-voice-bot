@@ -47,17 +47,22 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
   try{await entersState(connection,VoiceConnectionStatus.Ready,15000);connection.subscribe(s.player);
    await channel.send("Mini Minzo is active. Only administrators who explicitly enable listening for themselves with /voice-assistant enable are processed locally. Disable to stop.");
    connection.receiver.speaking.on("start",async id=>{
-    if(s.busy||!admin(channel.members.get(id))||!s.consent?.has(id))return;
+    if(!admin(channel.members.get(id))||!s.consent?.has(id))return;
+    console.log("Mini Minzo: consenting admin speaking; busy="+s.busy);
+    if(s.busy)return;
     s.busy=true;
     try{
      const prism=require("prism-media");
      const stream=connection.receiver.subscribe(id,{end:{behavior:EndBehaviorType.AfterSilence,duration:700}});s.stream=stream;
+     let packets=0,bytes=0;stream.on("data",()=>{if(++packets===1)console.log("Mini Minzo: first Opus packet");});
      const decoder=new prism.opus.Decoder({rate:48000,channels:2,frameSize:960});stream.on("error",()=>decoder.destroy());stream.pipe(decoder);
      const child=spawn("python3",[require("node:path").join(__dirname,"recognize.py")]);s.child=child;
-     child.stdin.on("error",()=>{});decoder.on("error",()=>child.kill());decoder.pipe(child.stdin);
+     child.stdin.on("error",()=>{});decoder.on("error",()=>child.kill());decoder.on("data",b=>{bytes+=b.length;});decoder.pipe(child.stdin);
      let out="";child.stdout.on("data",b=>{out+=b;if(out.length>4096)child.kill();});child.stderr.resume();
+     console.log("Mini Minzo: recognition process started");
      const timer=setTimeout(()=>{stream.destroy();decoder.end();},8000);
-     try{await new Promise((resolve,reject)=>{child.once("error",reject);child.once("close",c=>c===0?resolve():reject(Error("Recognition failed")));});if(active.get(guild.id)===s)await execute(s,id,JSON.parse(out).text||"");}finally{clearTimeout(timer);stream.destroy();decoder.destroy();child.kill();}
+     const hardTimeout=setTimeout(()=>child.kill(),25000);
+     try{await new Promise((resolve,reject)=>{child.once("error",reject);child.once("close",c=>c===0?resolve():reject(Error("Recognition failed")));});const recognized=JSON.parse(out).text||"";console.log("Mini Minzo: recognition finished; packets="+packets+" pcmBytes="+bytes+" words="+(recognized.trim()?recognized.trim().split(/\s+/).length:0)+" wake="+/^mini minzo\b/i.test(recognized)+" undo="+/^(mini minzo )?undo$/i.test(recognized));if(active.get(guild.id)===s)await execute(s,id,recognized);}finally{clearTimeout(timer);clearTimeout(hardTimeout);stream.destroy();decoder.destroy();child.kill();}
     }catch(e){console.error("Mini Minzo",e.message);}finally{s.busy=false;s.child=null;s.stream=null;}
    });
   }catch(e){close(guild.id);throw e;}
@@ -72,7 +77,7 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
    if(enabled.get(i.guild.id)!==channel.id)close(i.guild.id);
    enabled.set(i.guild.id,channel.id);await reconcile(i.guild);
    const s=active.get(i.guild.id);if(!s)throw Error("Voice connection unavailable. Stop other speech first.");
-   (s.consent??=new Set()).add(i.user.id);await i.editReply("Enabled. Your speech is processed locally. Say Mini Minzo, server mute followed by an exact member name. Disable to stop.");
+   (s.consent??=new Set()).add(i.user.id);console.log("Mini Minzo: admin consent enabled; connection="+s.connection.state.status);await i.editReply("Enabled. Your speech is processed locally. Say Mini Minzo, server mute followed by an exact member name. Disable to stop.");
   }catch(e){await i.editReply(e.message);}
  });
 };
