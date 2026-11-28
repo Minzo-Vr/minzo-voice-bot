@@ -8,7 +8,7 @@ ones = ["zero","one","two","three","four","five","six","seven","eight","nine","t
 tens = ["","","twenty","thirty","forty","fifty","sixty","seventy","eighty","ninety"]
 def number(n):
     return ones[n] if n < 20 else tens[n//10] + (" " + ones[n%10] if n%10 else "")
-wake = ["mini m", "mini em", "minnie m", "minnie em"]
+wake = ["mot", "mott", "moat"]
 allowed = wake if mode == "wake" else ["undo"] + [
     prefix + action + " user " + number(n)
     for prefix in ("server ", "")
@@ -40,7 +40,7 @@ for i in range(0,len(pcm),3200):
 collect(rec.FinalResult())
 text = " ".join(parts)
 confidence = min(scores, default=0)
-if text not in allowed or confidence < 0.75:
+if text not in allowed or confidence < (0.65 if mode == "wake" else 0.75):
     text = ""
 if mode == "wake" and text:
     text = "mini minzo"
