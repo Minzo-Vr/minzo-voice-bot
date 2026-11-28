@@ -8,7 +8,8 @@ ones = ["zero","one","two","three","four","five","six","seven","eight","nine","t
 tens = ["","","twenty","thirty","forty","fifty","sixty","seventy","eighty","ninety"]
 def number(n):
     return ones[n] if n < 20 else tens[n//10] + (" " + ones[n%10] if n%10 else "")
-wake = ["mot", "mott", "moat"]
+wake_phrase = sys.argv[2].strip().lower() if len(sys.argv) > 2 else "mot"
+wake = ["mot", "mott", "moat"] if wake_phrase == "mot" else [wake_phrase]
 allowed = wake if mode == "wake" else ["undo"] + [
     prefix + action + " user " + number(n)
     for prefix in ("server ", "")
