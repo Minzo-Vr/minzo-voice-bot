@@ -26,7 +26,7 @@ const client = new Client({
 });
 
 const miniMinzo = require("./mini-minzo");
-miniMinzo.install(client, {isBusy: id => pending.has(id) || sessions.has(id)});
+const assistant = miniMinzo.install(client, {isBusy: id => pending.has(id) || sessions.has(id)});
 const commands = [
   miniMinzo.command,
   new SlashCommandBuilder()
@@ -78,6 +78,8 @@ async function speak(guild, userId, phrase, voice) {
   if (!["natural", "robot"].includes(voice)) throw new Error("Invalid voice.");
   const channel = guild.voiceStates.cache.get(userId)?.channel;
   if (!channel || channel.type !== 2) throw new Error("Join a voice channel first.");
+  const assistantChannel = await assistant.manualSpeak(guild,userId,phrase,voice);
+  if (assistantChannel) return assistantChannel;
   if (require("@discordjs/voice").getVoiceConnection(guild.id) || pending.has(guild.id) || sessions.has(guild.id)) throw new Error("The voice bot is already speaking.");
   pending.add(guild.id);
   let connection, ffmpeg;
@@ -112,6 +114,7 @@ async function speak(guild, userId, phrase, voice) {
   } finally { pending.delete(guild.id); }
 }
 function stopFor(guild,userId) {
+  if (assistant.manualStop(guild,userId)) return;
   const session = sessions.get(guild.id);
   if (!session) return;
   if (guild.voiceStates.cache.get(userId)?.channelId !== session.channelId) throw new Error("Join the bot's voice channel first.");
