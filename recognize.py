@@ -8,7 +8,7 @@ ones = ["zero","one","two","three","four","five","six","seven","eight","nine","t
 tens = ["","","twenty","thirty","forty","fifty","sixty","seventy","eighty","ninety"]
 def number(n):
     return ones[n] if n < 20 else tens[n//10] + (" " + ones[n%10] if n%10 else "")
-wake = ["mini min so", "mini min zoo", "mini men so", "mini men zoo", "mini minnow", "mini min show", "mini minzo"]
+wake = ["mini m", "mini em", "minnie m", "minnie em"]
 allowed = wake if mode == "wake" else ["undo"] + [
     prefix + action + " user " + number(n)
     for prefix in ("server ", "")
