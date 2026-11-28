@@ -6,6 +6,7 @@ const ffmpeg=require("ffmpeg-static");
 const tts=require("google-tts-api");
 const {Readable}=require("node:stream");
 const fs=require("node:fs");
+const questions=require("./voice-questions");
 const path=require("node:path");
 const settingsPath=process.env.VOICE_ASSISTANT_SETTINGS_PATH||path.join(__dirname,".voice-assistant-settings.json");
 const validPhrase=p=>typeof p==="string"&&p.length<=48&&/^[a-z]+(?: [a-z]+){0,3}$/.test(p);
@@ -49,11 +50,18 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
    console.log("Mini Minzo: playback finished");
   }finally{input?.destroy();f?.kill();if(s.playAbort===controller){s.playAbort=null;s.ffmpeg=null;s.player.stop(true);}}
  }
- async function execute(s,id,text){
+ async function execute(s,id,text,kind){
   const m=s.channel.members.get(id);if(!admin(m)||active.get(s.channel.guild.id)!==s)return;
   text=text.toLowerCase().trim();
+  if(kind==="question"||kind==="inline-question"){
+   if(kind==="question"&&(s.armed.get(id)||0)<Date.now())return;
+   s.armed.delete(id);const epoch=s.wakeEpoch||0;
+   let answer;try{answer=await questions.answer(text);}catch(e){answer="I could not reach my information service. Please try again.";}
+   if(active.get(s.channel.guild.id)===s&&!s.manual&&(s.wakeEpoch||0)===epoch&&s.consent?.has(id)&&admin(s.channel.members.get(id)))await say(s,answer);
+   return;
+  }
   if(text==="mini minzo"){const epoch=s.wakeEpoch||0;s.armed.delete(id);await say(s,"Yes, sir?");if(active.get(s.channel.guild.id)===s&&(s.wakeEpoch||0)===epoch&&s.consent?.has(id)&&admin(s.channel.members.get(id)))s.armed.set(id,Date.now()+15000);return;}
-  if((s.armed.get(id)||0)<Date.now())return;
+  if(kind!=="moderation"||(s.armed.get(id)||0)<Date.now())return;
   s.armed.delete(id);
   if(/^(mini minzo )?undo$/.test(text)){
    const u=s.undo.get(id);if(!u)return say(s,"Nothing to undo.");
@@ -80,7 +88,7 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
   const s={channel,connection,player:createAudioPlayer(),undo:new Map(),armed:new Map(),busy:false};active.set(guild.id,s);
   connection.on("error",()=>close(guild.id));s.player.on("error",()=>close(guild.id));
   try{await entersState(connection,VoiceConnectionStatus.Ready,15000);connection.subscribe(s.player);
-   await channel.send("Mini Minzo is active. Only administrators who explicitly enable listening for themselves with /voice-assistant enable are processed locally. Disable to stop.");
+   await channel.send("Mini Minzo is active. Only administrators who explicitly enable listening for themselves with /voice-assistant enable are transcribed locally. Spoken questions may be sent as text to weather, Wikipedia or configured AI services; replies use online text to speech. Disable to stop.");
    connection.receiver.speaking.on("start",async id=>{
     if(!admin(channel.members.get(id))||!s.consent?.has(id))return;
     console.log("Mini Minzo: consenting admin speaking; busy="+s.busy);
@@ -99,7 +107,7 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
      console.log("Mini Minzo: recognition process started");
      const timer=setTimeout(()=>{stream.destroy();decoder.end();},8000);
      const hardTimeout=setTimeout(()=>child.kill(),25000);
-     try{await new Promise((resolve,reject)=>{child.once("error",reject);child.once("close",c=>c===0?resolve():reject(Error("Recognition failed")));});const result=JSON.parse(out);const recognized=result.text||"";console.log("Mini Minzo: mode="+mode+" rms="+result.rms+" peak="+result.peak+" confidence="+result.confidence);console.log("Mini Minzo: recognition finished; packets="+packets+" pcmBytes="+bytes+" words="+(recognized.trim()?recognized.trim().split(/\s+/).length:0)+" wake="+/^mini minzo\b/i.test(recognized)+" undo="+/^(mini minzo )?undo$/i.test(recognized));if(active.get(guild.id)===s&&(s.wakeEpoch||0)===epoch&&!s.manual&&s.consent?.has(id)&&admin(channel.members.get(id))){if(recognized)await execute(s,id,recognized);else if(mode==="command"){s.armed.delete(id);await say(s,"I did not understand. Please say "+wakeFor(guild.id)+" and try again.");}}}finally{clearTimeout(timer);clearTimeout(hardTimeout);stream.destroy();decoder.destroy();child.kill();}
+     try{await new Promise((resolve,reject)=>{child.once("error",reject);child.once("close",c=>c===0?resolve():reject(Error("Recognition failed")));});const result=JSON.parse(out);const recognized=result.text||"";console.log("Mini Minzo: mode="+mode+" rms="+result.rms+" peak="+result.peak+" confidence="+result.confidence);console.log("Mini Minzo: recognition finished; packets="+packets+" pcmBytes="+bytes+" words="+(recognized.trim()?recognized.trim().split(/\s+/).length:0)+" wake="+/^mini minzo\b/i.test(recognized)+" undo="+/^(mini minzo )?undo$/i.test(recognized));if(active.get(guild.id)===s&&(s.wakeEpoch||0)===epoch&&!s.manual&&s.consent?.has(id)&&admin(channel.members.get(id))){if(recognized)await execute(s,id,recognized,result.kind);else if(mode==="command"){s.armed.delete(id);await say(s,"I did not understand. Please say "+wakeFor(guild.id)+" and try again.");}}}finally{clearTimeout(timer);clearTimeout(hardTimeout);stream.destroy();decoder.destroy();child.kill();}
     }catch(e){console.error("Mini Minzo",e.message);}finally{s.busy=false;s.speaker=null;s.child=null;s.stream=null;}
    });
   }catch(e){close(guild.id);throw e;}
@@ -138,7 +146,7 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
    if(enabled.get(i.guild.id)!==channel.id)close(i.guild.id);
    enabled.set(i.guild.id,channel.id);await reconcile(i.guild);await syncNumbers(i.guild);
    const s=active.get(i.guild.id);if(!s)throw Error("Voice connection unavailable. Stop other speech first.");
-   (s.consent??=new Set()).add(i.user.id);console.log("Mini Minzo: admin consent enabled; connection="+s.connection.state.status);await i.editReply("Enabled. Your speech is processed locally. Say "+wakeFor(i.guild.id)+", wait for Yes sir, then say server mute user five (using the displayed number). Disable to stop.");
+   (s.consent??=new Set()).add(i.user.id);console.log("Mini Minzo: admin consent enabled; connection="+s.connection.state.status);await i.editReply("Enabled. Speech recognition is local; question text may be sent to external information services. Say "+wakeFor(i.guild.id)+", wait for Yes sir, then ask a question or say server mute user five (using the displayed number). Disable to stop.");
   }catch(e){await i.editReply(e.message);}
  });
  return {manualSpeak,manualStop};
