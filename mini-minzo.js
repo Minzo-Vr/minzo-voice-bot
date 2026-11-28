@@ -5,9 +5,18 @@ const {spawn}=require("node:child_process");
 const ffmpeg=require("ffmpeg-static");
 const tts=require("google-tts-api");
 const {Readable}=require("node:stream");
-module.exports.command=new SlashCommandBuilder().setName("voice-assistant").setDescription("Configure Mini Minzo").setDefaultMemberPermissions(P.Administrator).addStringOption(o=>o.setName("action").setDescription("Enable or disable in your current voice channel").setRequired(true).addChoices({name:"Enable",value:"enable"},{name:"Disable",value:"disable"},{name:"Test voice reply",value:"test"},{name:"Wake assistant manually",value:"wake"}));
+const fs=require("node:fs");
+const path=require("node:path");
+const settingsPath=process.env.VOICE_ASSISTANT_SETTINGS_PATH||path.join(__dirname,".voice-assistant-settings.json");
+const validPhrase=p=>typeof p==="string"&&p.length<=48&&/^[a-z]+(?: [a-z]+){0,3}$/.test(p);
+module.exports.command=new SlashCommandBuilder().setName("voice-assistant").setDescription("Configure Mini Minzo").setDefaultMemberPermissions(P.Administrator).addStringOption(o=>o.setName("action").setDescription("Enable or disable in your current voice channel").setRequired(true).addChoices({name:"Enable",value:"enable"},{name:"Disable",value:"disable"},{name:"Test voice reply",value:"test"},{name:"Wake assistant manually",value:"wake"},{name:"Set wake phrase",value:"set-phrase"},{name:"Show wake phrase",value:"show-phrase"})).addStringOption(o=>o.setName("phrase").setDescription("New wake phrase, 1 to 4 English words").setMaxLength(48));
 module.exports.install=function(client,{isBusy=()=>false}={}){
  const enabled=new Map(), active=new Map();
+ const wakePhrases=new Map();
+ try{for(const [id,p] of Object.entries(JSON.parse(fs.readFileSync(settingsPath,"utf8")))){if(/^\d{15,22}$/.test(id)&&validPhrase(p))wakePhrases.set(id,p);}}catch(e){if(e.code!=="ENOENT")console.error("Mini Minzo settings read:",e.message);}
+ const wakeFor=id=>wakePhrases.get(id)||"mot";
+ function setWake(id,phrase){const next=new Map(wakePhrases);next.set(id,phrase);fs.mkdirSync(path.dirname(settingsPath),{recursive:true});const tmp=settingsPath+".tmp";fs.writeFileSync(tmp,JSON.stringify(Object.fromEntries(next)),{mode:0o600});fs.renameSync(tmp,settingsPath);wakePhrases.set(id,phrase);}
+
  const numbers=new Map();
  async function syncNumbers(guild){
   const channel=guild.channels.cache.get(enabled.get(guild.id));
@@ -43,7 +52,7 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
  async function execute(s,id,text){
   const m=s.channel.members.get(id);if(!admin(m)||active.get(s.channel.guild.id)!==s)return;
   text=text.toLowerCase().trim();
-  if(text==="mini minzo"){s.armed.delete(id);await say(s,"Yes, sir?");if(active.get(s.channel.guild.id)===s&&s.consent?.has(id)&&admin(s.channel.members.get(id)))s.armed.set(id,Date.now()+15000);return;}
+  if(text==="mini minzo"){const epoch=s.wakeEpoch||0;s.armed.delete(id);await say(s,"Yes, sir?");if(active.get(s.channel.guild.id)===s&&(s.wakeEpoch||0)===epoch&&s.consent?.has(id)&&admin(s.channel.members.get(id)))s.armed.set(id,Date.now()+15000);return;}
   if((s.armed.get(id)||0)<Date.now())return;
   s.armed.delete(id);
   if(/^(mini minzo )?undo$/.test(text)){
@@ -83,13 +92,14 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
      let packets=0,bytes=0;stream.on("data",()=>{if(++packets===1)console.log("Mini Minzo: first Opus packet");});
      const decoder=new prism.opus.Decoder({rate:48000,channels:1,frameSize:960});stream.on("error",()=>decoder.destroy());stream.pipe(decoder);
      const mode=(s.armed.get(id)||0)>Date.now()?"command":"wake";
-     const child=spawn("python3",[require("node:path").join(__dirname,"recognize.py"),mode]);s.child=child;
+     const phrase=wakeFor(guild.id),epoch=s.wakeEpoch||0;
+     const child=spawn("python3",[require("node:path").join(__dirname,"recognize.py"),mode,phrase]);s.child=child;
      child.stdin.on("error",()=>{});decoder.on("error",()=>child.kill());decoder.on("data",b=>{bytes+=b.length;});decoder.pipe(child.stdin);
      let out="";child.stdout.on("data",b=>{out+=b;if(out.length>4096)child.kill();});child.stderr.resume();
      console.log("Mini Minzo: recognition process started");
      const timer=setTimeout(()=>{stream.destroy();decoder.end();},8000);
      const hardTimeout=setTimeout(()=>child.kill(),25000);
-     try{await new Promise((resolve,reject)=>{child.once("error",reject);child.once("close",c=>c===0?resolve():reject(Error("Recognition failed")));});const result=JSON.parse(out);const recognized=result.text||"";console.log("Mini Minzo: mode="+mode+" rms="+result.rms+" peak="+result.peak+" confidence="+result.confidence);console.log("Mini Minzo: recognition finished; packets="+packets+" pcmBytes="+bytes+" words="+(recognized.trim()?recognized.trim().split(/\s+/).length:0)+" wake="+/^mini minzo\b/i.test(recognized)+" undo="+/^(mini minzo )?undo$/i.test(recognized));if(active.get(guild.id)===s&&!s.manual&&s.consent?.has(id)&&admin(channel.members.get(id))){if(recognized)await execute(s,id,recognized);else if(mode==="command"){s.armed.delete(id);await say(s,"I did not understand. Please say Mot and try again.");}}}finally{clearTimeout(timer);clearTimeout(hardTimeout);stream.destroy();decoder.destroy();child.kill();}
+     try{await new Promise((resolve,reject)=>{child.once("error",reject);child.once("close",c=>c===0?resolve():reject(Error("Recognition failed")));});const result=JSON.parse(out);const recognized=result.text||"";console.log("Mini Minzo: mode="+mode+" rms="+result.rms+" peak="+result.peak+" confidence="+result.confidence);console.log("Mini Minzo: recognition finished; packets="+packets+" pcmBytes="+bytes+" words="+(recognized.trim()?recognized.trim().split(/\s+/).length:0)+" wake="+/^mini minzo\b/i.test(recognized)+" undo="+/^(mini minzo )?undo$/i.test(recognized));if(active.get(guild.id)===s&&(s.wakeEpoch||0)===epoch&&!s.manual&&s.consent?.has(id)&&admin(channel.members.get(id))){if(recognized)await execute(s,id,recognized);else if(mode==="command"){s.armed.delete(id);await say(s,"I did not understand. Please say "+wakeFor(guild.id)+" and try again.");}}}finally{clearTimeout(timer);clearTimeout(hardTimeout);stream.destroy();decoder.destroy();child.kill();}
     }catch(e){console.error("Mini Minzo",e.message);}finally{s.busy=false;s.speaker=null;s.child=null;s.stream=null;}
    });
   }catch(e){close(guild.id);throw e;}
@@ -118,14 +128,17 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
   if(!i.isChatInputCommand()||i.commandName!=="voice-assistant")return;
   if(!i.guild||!i.memberPermissions.has(P.Administrator))return i.reply({content:"Administrators only.",ephemeral:true});
   await i.deferReply({ephemeral:true});
-  try{if(i.options.getString("action")==="disable"){enabled.delete(i.guild.id);close(i.guild.id);await syncNumbers(i.guild);return i.editReply("Assistant disabled.");}
+  try{const action=i.options.getString("action");
+   if(action==="show-phrase")return await i.editReply("Current wake phrase: **"+wakeFor(i.guild.id)+"**");
+   if(action==="set-phrase"){const phrase=(i.options.getString("phrase")||"").trim().toLowerCase().replace(/\s+/g," ");if(!validPhrase(phrase))throw Error("Enter one to four English words, up to 48 letters and spaces. Example: hey computer.");setWake(i.guild.id,phrase);const s=active.get(i.guild.id);if(s){s.wakeEpoch=(s.wakeEpoch||0)+1;s.armed.clear();s.child?.kill();s.stream?.destroy();}return await i.editReply("Wake phrase changed to **"+phrase+"**. Try saying it and wait for Yes, sir?");}
+   if(action==="disable"){enabled.delete(i.guild.id);close(i.guild.id);await syncNumbers(i.guild);return i.editReply("Assistant disabled.");}
    if(i.options.getString("action")==="wake"){const s=active.get(i.guild.id);if(!s||!s.consent?.has(i.user.id)||i.member.voice.channelId!==s.channel.id)throw Error("Enable the assistant in your voice channel first.");await manualSpeak(i.guild,i.user.id,"Yes, sir?","robot");if(active.get(i.guild.id)===s&&s.consent?.has(i.user.id)&&i.member.voice.channelId===s.channel.id)s.armed.set(i.user.id,Date.now()+15000);return await i.editReply("Listening for your numbered command for 15 seconds.");}
    if(i.options.getString("action")==="test"){const s=active.get(i.guild.id);if(!s||i.member.voice.channelId!==s.channel.id||s.manual)throw Error("Enable the assistant in your voice channel first, or stop the current reply.");await manualSpeak(i.guild,i.user.id,"Yes, sir?","robot");return await i.editReply("Test voice reply played.");}
    const channel=i.member.voice.channel;if(!channel||channel.type!==2||channel.id===process.env.JOIN_TO_CREATE_CHANNEL_ID)throw Error("Join a normal voice channel first.");
    if(enabled.get(i.guild.id)!==channel.id)close(i.guild.id);
    enabled.set(i.guild.id,channel.id);await reconcile(i.guild);await syncNumbers(i.guild);
    const s=active.get(i.guild.id);if(!s)throw Error("Voice connection unavailable. Stop other speech first.");
-   (s.consent??=new Set()).add(i.user.id);console.log("Mini Minzo: admin consent enabled; connection="+s.connection.state.status);await i.editReply("Enabled. Your speech is processed locally. Say Mot, wait for Yes sir, then say server mute user five (using the displayed number). Disable to stop.");
+   (s.consent??=new Set()).add(i.user.id);console.log("Mini Minzo: admin consent enabled; connection="+s.connection.state.status);await i.editReply("Enabled. Your speech is processed locally. Say "+wakeFor(i.guild.id)+", wait for Yes sir, then say server mute user five (using the displayed number). Disable to stop.");
   }catch(e){await i.editReply(e.message);}
  });
  return {manualSpeak,manualStop};
