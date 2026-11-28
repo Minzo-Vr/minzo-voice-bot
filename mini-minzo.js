@@ -8,6 +8,20 @@ const {Readable}=require("node:stream");
 module.exports.command=new SlashCommandBuilder().setName("voice-assistant").setDescription("Configure Mini Minzo").setDefaultMemberPermissions(P.Administrator).addStringOption(o=>o.setName("action").setDescription("Enable or disable in your current voice channel").setRequired(true).addChoices({name:"Enable",value:"enable"},{name:"Disable",value:"disable"}));
 module.exports.install=function(client,{isBusy=()=>false}={}){
  const enabled=new Map(), active=new Map();
+ const numbers=new Map();
+ async function syncNumbers(guild){
+  const channel=guild.channels.cache.get(enabled.get(guild.id));
+  let state=numbers.get(guild.id);
+  if(!state){if(!channel)return;state={next:1,entries:new Map(),queue:Promise.resolve()};numbers.set(guild.id,state);}
+  state.queue=state.queue.catch(()=>{}).then(async()=>{
+   const current=guild.channels.cache.get(enabled.get(guild.id));
+   for(const [id,e] of state.entries){if(current?.id===e.channel&&current.members.has(id))continue;const m=guild.members.cache.get(id);if(e.applied&&m?.manageable&&m.nickname===e.applied)await m.setNickname(e.original,"Mini Minzo restore").catch(console.error);state.entries.delete(id);}
+   if(!current)return;
+   let changed=false;
+   for(const m of current.members.values()){if(m.user.bot||state.entries.has(m.id))continue;const n=state.next++,suffix=" ["+n+"]",e={n,channel:current.id,original:m.nickname,applied:null};state.entries.set(m.id,e);changed=true;if(m.manageable&&guild.members.me.permissions.has(P.ManageNicknames)){const nick=m.displayName.slice(0,32-suffix.length)+suffix;try{await m.setNickname(nick,"Mini Minzo voice numbering");e.applied=nick;}catch(err){console.error("Mini Minzo nickname:",err.message);}}}
+   if(changed)await current.send({content:"Mini Minzo user numbers:\n"+[...state.entries].map(([id,e])=>"User "+e.n+": <@"+id+">").join("\n").slice(0,1800),allowedMentions:{parse:[]}}).catch(console.error);
+  });return state.queue;
+ }
  const admin=m=>m&&!m.user.bot&&m.permissions.has(P.Administrator);
  function close(id){const s=active.get(id);if(!s)return;active.delete(id);s.child?.kill();s.stream?.destroy();s.player.stop(true);if(s.connection.state.status!=="destroyed")s.connection.destroy();}
  async function say(s,text){
@@ -28,8 +42,8 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
    const t=s.channel.members.get(u.id);if(!t||!t.manageable||admin(t)||Date.now()-u.time>30000||t.voice[u.field]!==u.after)return say(s,"Cannot undo. State changed.");
    await t.voice[u.method](u.before,"Mini Minzo undo");s.undo.delete(id);return say(s,"Undo.");
   }
-  const match=/^mini minzo (?:server )?(mute|unmute|deafen|undeafen) (.+)$/.exec(text);if(!match)return;
-  const targets=s.channel.members.filter(t=>!t.user.bot&&[t.displayName,t.user.username].some(n=>n.toLowerCase()===match[2]));
+  const match=/^(?:mini minzo )?server (mute|unmute|deafen|undeafen) (.+)$/.exec(text);if(!match)return;
+  const spoken=match[2].match(/^user (.+)$/);const words={one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10,eleven:11,twelve:12,thirteen:13,fourteen:14,fifteen:15,sixteen:16,seventeen:17,eighteen:18,nineteen:19,twenty:20};const num=spoken?(words[spoken[1]]||Number(spoken[1])):null;const entries=numbers.get(s.channel.guild.id)?.entries;const targets=s.channel.members.filter(t=>!t.user.bot&&(spoken?entries?.get(t.id)?.n===num:[t.displayName,t.user.username,entries?.get(t.id)?.original].some(n=>n?.toLowerCase()===match[2])));
   if(targets.size!==1)return say(s,"I could not identify one matching member.");
   const t=targets.first();if(admin(t)||t.id===id||!t.manageable||(m.id!==m.guild.ownerId&&m.roles.highest.comparePositionTo(t.roles.highest)<=0))return say(s,"That member is protected.");
   const deaf=match[1].includes("deafen"),field=deaf?"serverDeaf":"serverMute",method=deaf?"setDeaf":"setMute",after=!match[1].startsWith("un"),before=t.voice[field];
@@ -67,15 +81,15 @@ module.exports.install=function(client,{isBusy=()=>false}={}){
    });
   }catch(e){close(guild.id);throw e;}
  }
- client.on("voiceStateUpdate",(a,b)=>{if(a.channelId!==b.channelId)reconcile(b.guild).catch(console.error);});
+ client.on("voiceStateUpdate",(a,b)=>{if(a.channelId!==b.channelId){reconcile(b.guild).catch(console.error);syncNumbers(b.guild).catch(console.error);}});
  client.on("interactionCreate",async i=>{
   if(!i.isChatInputCommand()||i.commandName!=="voice-assistant")return;
   if(!i.guild||!i.memberPermissions.has(P.Administrator))return i.reply({content:"Administrators only.",ephemeral:true});
   await i.deferReply({ephemeral:true});
-  try{if(i.options.getString("action")==="disable"){enabled.delete(i.guild.id);close(i.guild.id);return i.editReply("Assistant disabled.");}
+  try{if(i.options.getString("action")==="disable"){enabled.delete(i.guild.id);close(i.guild.id);await syncNumbers(i.guild);return i.editReply("Assistant disabled.");}
    const channel=i.member.voice.channel;if(!channel||channel.type!==2||channel.id===process.env.JOIN_TO_CREATE_CHANNEL_ID)throw Error("Join a normal voice channel first.");
    if(enabled.get(i.guild.id)!==channel.id)close(i.guild.id);
-   enabled.set(i.guild.id,channel.id);await reconcile(i.guild);
+   enabled.set(i.guild.id,channel.id);await reconcile(i.guild);await syncNumbers(i.guild);
    const s=active.get(i.guild.id);if(!s)throw Error("Voice connection unavailable. Stop other speech first.");
    (s.consent??=new Set()).add(i.user.id);console.log("Mini Minzo: admin consent enabled; connection="+s.connection.state.status);await i.editReply("Enabled. Your speech is processed locally. Say Mini Minzo, server mute followed by an exact member name. Disable to stop.");
   }catch(e){await i.editReply(e.message);}
